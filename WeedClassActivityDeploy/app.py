@@ -102,7 +102,6 @@ def draw_overlay_on_view(view_img, view_offset, aoi_px, nx, ny, selected,
     if x1v < 0 or y1v < 0 or x0v > img.size[0] or y0v > img.size[1]:
         return img
 
-    # Clip AOI drawing to view boundary (PIL doesn't clip automatically for rects, but it’s ok)
     # AOI outline halo + cyan
     d.rectangle([x0v, y0v, x1v, y1v], outline=(0, 0, 0), width=aoi_outer)
     d.rectangle([x0v, y0v, x1v, y1v], outline=(0, 255, 255), width=aoi_inner)
@@ -194,7 +193,7 @@ with st.sidebar:
     if colp8.button("⬇️"):
         ss["view_cy"] = None if ss["view_cy"] is None else ss["view_cy"] + pan_step
 
-    st.caption("Tip: you can also pan by clicking a point and using the arrow buttons.")
+    st.caption("Tip: click a point in the image, then use arrows to pan around that area.")
 
     st.divider()
     show_grid = st.checkbox("Show grid lines", value=True)
@@ -215,175 +214,166 @@ with st.sidebar:
         ss["last_raw_click"] = None
 
 
-col_left, col_right = st.columns([1.25, 0.75], gap="large")
+# -------- Option A layout: Image/Interact first, Results below --------
+st.subheader("Upload image")
+up = st.file_uploader("Upload a drone image", type=["png", "jpg", "jpeg", "tif", "tiff", "bmp"])
 
-with col_left:
-    st.subheader("Upload image")
-    up = st.file_uploader("Upload a drone image", type=["png", "jpg", "jpeg", "tif", "tiff", "bmp"])
+if up is not None:
+    data = up.getvalue()
+    h = hashlib.md5(data).hexdigest()
+    if ss["img_hash"] != h:
+        img = Image.open(io.BytesIO(data)).convert("RGB")
+        ss["img"] = img
+        ss["img_name"] = up.name
+        ss["img_hash"] = h
 
-    if up is not None:
-        data = up.getvalue()
-        h = hashlib.md5(data).hexdigest()
-        if ss["img_hash"] != h:
-            img = Image.open(io.BytesIO(data)).convert("RGB")
-            ss["img"] = img
-            ss["img_name"] = up.name
-            ss["img_hash"] = h
-
-            # init view center
-            W, H = img.size
-            ss["view_cx"] = W // 2
-            ss["view_cy"] = H // 2
-            ss["view_zoom"] = 1.0
-
-            ss["aoi_clicks"] = []
-            ss["aoi_px"] = None
-            ss["selected"] = None
-            ss["status"] = "Image loaded. Click two corners to set AOI."
-            ss["last_raw_click"] = None
-
-    if ss["img"] is None:
-        st.info("Upload an image to begin.")
-        st.stop()
-
-    base_img = ss["img"]
-    W, H = base_img.size
-
-    if ss["view_cx"] is None:
+        # init view center
+        W, H = img.size
         ss["view_cx"] = W // 2
-    if ss["view_cy"] is None:
         ss["view_cy"] = H // 2
+        ss["view_zoom"] = 1.0
 
-    # Clamp viewport center to image
-    ss["view_cx"] = clamp(int(ss["view_cx"]), 0, W - 1)
-    ss["view_cy"] = clamp(int(ss["view_cy"]), 0, H - 1)
+        ss["aoi_clicks"] = []
+        ss["aoi_px"] = None
+        ss["selected"] = None
+        ss["status"] = "Image loaded. Click two corners to set AOI."
+        ss["last_raw_click"] = None
 
-    # Compute grid dims (can change live without wiping selections)
-    nx, ny = compute_grid_dims(aoi_w_ft, aoi_h_ft, cell_w_ft, cell_h_ft)
+if ss["img"] is None:
+    st.info("Upload an image to begin.")
+    st.stop()
 
-    if ss["aoi_px"] is not None:
-        if ss["selected"] is None:
-            ss["selected"] = np.zeros((ny, nx), dtype=bool)
-        elif ss["selected"].shape != (ny, nx):
-            ss["selected"] = resample_selection(ss["selected"], ny, nx)
+base_img = ss["img"]
+W, H = base_img.size
 
-    # Viewport size in full-image pixels
-    # At zoom=1.0: show full image width (limited by display), at zoom>1: show smaller crop
-    # Keep viewport aspect based on display width.
-    disp_w = 1200  # fixed display width for stability (change if you want)
-    disp_w = clamp(disp_w, 700, 1600)
-    disp_h = int(disp_w * (H / W))
+if ss["view_cx"] is None:
+    ss["view_cx"] = W // 2
+if ss["view_cy"] is None:
+    ss["view_cy"] = H // 2
 
-    view_w = int(W / ss["view_zoom"])
-    view_h = int(H / ss["view_zoom"])
-    view_w = clamp(view_w, 200, W)
-    view_h = clamp(view_h, 200, H)
+# Clamp viewport center to image
+ss["view_cx"] = clamp(int(ss["view_cx"]), 0, W - 1)
+ss["view_cy"] = clamp(int(ss["view_cy"]), 0, H - 1)
 
-    view_img, ox, oy = crop_view(base_img, ss["view_cx"], ss["view_cy"], view_w, view_h)
+# Compute grid dims (can change live without wiping selections)
+nx, ny = compute_grid_dims(aoi_w_ft, aoi_h_ft, cell_w_ft, cell_h_ft)
 
-    # Resize viewport to display size
-    view_img_disp = view_img.resize((disp_w, disp_h))
+if ss["aoi_px"] is not None:
+    if ss["selected"] is None:
+        ss["selected"] = np.zeros((ny, nx), dtype=bool)
+    elif ss["selected"].shape != (ny, nx):
+        ss["selected"] = resample_selection(ss["selected"], ny, nx)
 
-    # Need scale factors from displayed viewport -> full-image
-    sx = view_w / float(disp_w)
-    sy = view_h / float(disp_h)
+# ---- Bigger display width now that Results are BELOW ----
+# Tune max if you want: 2400 or 2600 are fine for big monitors.
+disp_w = 2000
+disp_w = clamp(disp_w, 1000, 2400)
+disp_h = int(disp_w * (H / W))
 
-    first_corner = ss["aoi_clicks"][0] if len(ss["aoi_clicks"]) == 1 else None
+view_w = int(W / ss["view_zoom"])
+view_h = int(H / ss["view_zoom"])
+view_w = clamp(view_w, 200, W)
+view_h = clamp(view_h, 200, H)
 
-    # Draw overlay on the DISPLAY image, but overlay computations need full-image coords,
-    # so we draw on the full-resolution viewport then resize.
-    overlay_view = draw_overlay_on_view(
-        view_img, (ox, oy),
-        ss["aoi_px"], nx, ny, ss["selected"],
-        show_grid=show_grid,
-        first_corner=first_corner,
-        grid_outer=6, grid_inner=4  # thicker grid
-    ).resize((disp_w, disp_h))
+view_img, ox, oy = crop_view(base_img, ss["view_cx"], ss["view_cy"], view_w, view_h)
 
-    st.subheader("Interact")
-    if mode == "Set AOI (2 clicks)":
-        st.info("Click corner 1 and corner 2 of the AOI (inside the viewport).")
-    else:
-        st.info("Click cells to toggle spray (red outline).")
+# Need scale factors from displayed viewport -> full-image
+sx = view_w / float(disp_w)
+sy = view_h / float(disp_h)
 
-    clicked = streamlit_image_coordinates(overlay_view, width=disp_w, key="img_clicks")
+first_corner = ss["aoi_clicks"][0] if len(ss["aoi_clicks"]) == 1 else None
 
-    if debug:
-        st.write("clicked:", clicked)
-        st.write("aoi_clicks:", ss["aoi_clicks"])
-        st.write("aoi_px:", ss["aoi_px"])
-        st.write("view offset:", (ox, oy))
-        st.write("view zoom:", ss["view_zoom"])
+overlay_view = draw_overlay_on_view(
+    view_img, (ox, oy),
+    ss["aoi_px"], nx, ny, ss["selected"],
+    show_grid=show_grid,
+    first_corner=first_corner,
+    grid_outer=7, grid_inner=5  # slightly thicker
+).resize((disp_w, disp_h))
 
-    # Handle click exactly once per new click
-    if isinstance(clicked, dict) and "x" in clicked and "y" in clicked:
-        raw = (int(clicked["x"]), int(clicked["y"]))
-        if raw != ss["last_raw_click"]:
-            ss["last_raw_click"] = raw
+st.subheader("Interact")
+if mode == "Set AOI (2 clicks)":
+    st.info("Click corner 1 and corner 2 of the AOI (inside the viewport).")
+else:
+    st.info("Click cells to toggle spray (red outline).")
 
-            # Map click from displayed viewport -> full image coords
-            x_full = int(ox + clicked["x"] * sx)
-            y_full = int(oy + clicked["y"] * sy)
-            x_full = clamp(x_full, 0, W - 1)
-            y_full = clamp(y_full, 0, H - 1)
+clicked = streamlit_image_coordinates(overlay_view, width=disp_w, key="img_clicks")
 
-            # handy: set pan center to last click (makes “pan arrows” intuitive)
-            ss["view_cx"] = x_full
-            ss["view_cy"] = y_full
+if debug:
+    st.write("clicked:", clicked)
+    st.write("aoi_clicks:", ss["aoi_clicks"])
+    st.write("aoi_px:", ss["aoi_px"])
+    st.write("view offset:", (ox, oy))
+    st.write("view zoom:", ss["view_zoom"])
 
-            if mode == "Set AOI (2 clicks)":
-                if ss["aoi_px"] is not None and len(ss["aoi_clicks"]) == 0:
-                    ss["aoi_px"] = None
-                    ss["selected"] = None
+# Handle click exactly once per new click
+if isinstance(clicked, dict) and "x" in clicked and "y" in clicked:
+    raw = (int(clicked["x"]), int(clicked["y"]))
+    if raw != ss["last_raw_click"]:
+        ss["last_raw_click"] = raw
 
-                if len(ss["aoi_clicks"]) == 0:
-                    ss["aoi_clicks"] = [(x_full, y_full)]
-                    ss["status"] = "Corner 1 set. Now click the opposite corner."
-                else:
-                    p1 = ss["aoi_clicks"][0]
-                    p2 = (x_full, y_full)
-                    ss["aoi_px"] = normalize_rect(p1, p2)
-                    ss["aoi_clicks"] = []
-                    ss["selected"] = np.zeros((ny, nx), dtype=bool)
-                    ss["status"] = "AOI set. Switch to weeds mode."
+        # Map click from displayed viewport -> full image coords
+        x_full = int(ox + clicked["x"] * sx)
+        y_full = int(oy + clicked["y"] * sy)
+        x_full = clamp(x_full, 0, W - 1)
+        y_full = clamp(y_full, 0, H - 1)
 
+        # handy: set pan center to last click (makes “pan arrows” intuitive)
+        ss["view_cx"] = x_full
+        ss["view_cy"] = y_full
+
+        if mode == "Set AOI (2 clicks)":
+            if ss["aoi_px"] is not None and len(ss["aoi_clicks"]) == 0:
+                ss["aoi_px"] = None
+                ss["selected"] = None
+
+            if len(ss["aoi_clicks"]) == 0:
+                ss["aoi_clicks"] = [(x_full, y_full)]
+                ss["status"] = "Corner 1 set. Now click the opposite corner."
             else:
-                if ss["aoi_px"] is None:
-                    ss["status"] = "Set AOI first (switch to AOI mode)."
+                p1 = ss["aoi_clicks"][0]
+                p2 = (x_full, y_full)
+                ss["aoi_px"] = normalize_rect(p1, p2)
+                ss["aoi_clicks"] = []
+                ss["selected"] = np.zeros((ny, nx), dtype=bool)
+                ss["status"] = "AOI set. Switch to weeds mode."
+        else:
+            if ss["aoi_px"] is None:
+                ss["status"] = "Set AOI first (switch to AOI mode)."
+            else:
+                cell = click_to_cell(x_full, y_full, ss["aoi_px"], nx, ny)
+                if cell is None:
+                    ss["status"] = "Clicked outside AOI."
                 else:
-                    cell = click_to_cell(x_full, y_full, ss["aoi_px"], nx, ny)
-                    if cell is None:
-                        ss["status"] = "Clicked outside AOI."
-                    else:
-                        r, c = cell
-                        ss["selected"][r, c] = ~ss["selected"][r, c]
-                        ss["status"] = f"Toggled cell r={r}, c={c}."
+                    r, c = cell
+                    ss["selected"][r, c] = ~ss["selected"][r, c]
+                    ss["status"] = f"Toggled cell r={r}, c={c}."
 
-            # IMPORTANT: force immediate redraw so you see the red box right away
-            st.rerun()
+        st.rerun()
 
-    if ss.get("status"):
-        st.success(ss["status"])
+if ss.get("status"):
+    st.success(ss["status"])
 
 
-with col_right:
-    st.subheader("Results")
+# ---------------- Results BELOW the image (Option A) ----------------
+st.markdown("---")
+st.subheader("Results")
 
-    if ss["aoi_px"] is None or ss["selected"] is None:
-        st.warning("Set the AOI to see calculations.")
-        st.stop()
+if ss["aoi_px"] is None or ss["selected"] is None:
+    st.warning("Set the AOI to see calculations.")
+    st.stop()
 
-    total = nx * ny
-    sprayed = int(ss["selected"].sum())
-    unsprayed = total - sprayed
-    savings_frac = (unsprayed / total) if total else 0.0
-    savings_pct = savings_frac * 100.0
+total = nx * ny
+sprayed = int(ss["selected"].sum())
+unsprayed = total - sprayed
+savings_frac = (unsprayed / total) if total else 0.0
+savings_pct = savings_frac * 100.0
 
-    full_cost = acres * cost_per_ac
-    field_savings = savings_frac * full_cost
+full_cost = acres * cost_per_ac
+field_savings = savings_frac * full_cost
 
-    st.markdown(
-        f"""
+st.markdown(
+    f"""
 **Image:** {ss["img_name"]}  
 **AOI (ft):** {aoi_w_ft:g} W × {aoi_h_ft:g} H  
 **Cell (ft):** {cell_w_ft:g} W × {cell_h_ft:g} H  
@@ -397,11 +387,11 @@ with col_right:
 **Full-field herbicide cost:** ${full_cost:,.2f}  
 ✅ **Potential savings:** **${field_savings:,.2f}**
 """
-    )
+)
 
-    st.download_button(
-        "Download CSV",
-        data=selection_csv_bytes(ss["selected"]),
-        file_name="spot_spray_grid.csv",
-        mime="text/csv"
-    )
+st.download_button(
+    "Download CSV",
+    data=selection_csv_bytes(ss["selected"]),
+    file_name="spot_spray_grid.csv",
+    mime="text/csv"
+)
