@@ -1,6 +1,9 @@
 import io
 import csv
 import hashlib
+from pathlib import Path
+from typing import Optional, Tuple
+
 import numpy as np
 import streamlit as st
 from PIL import Image, ImageDraw
@@ -8,19 +11,59 @@ from PIL import Image, ImageDraw
 from streamlit_image_coordinates import streamlit_image_coordinates
 
 
+# ==================== CLASS IMAGE SETTINGS ====================
+# Put ONE image in each folder:
+#   images/very-low/
+#   images/low/
+#   images/medium/
+#   images/high/
+IMAGE_ROOT = Path(__file__).parent / "images"
+LEVEL_DIRS = {
+    "Very-low": "very-low",
+    "Low": "low",
+    "Medium": "medium",
+    "High": "high",
+}
+VALID_EXTS = {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp"}
+
+
+def find_single_image_for_level(level_label: str) -> Optional[Path]:
+    folder = IMAGE_ROOT / LEVEL_DIRS[level_label]
+    if not folder.exists():
+        return None
+    files = [p for p in folder.iterdir() if p.is_file() and p.suffix.lower() in VALID_EXTS]
+    files.sort()
+    if not files:
+        return None
+    return files[0]  # deterministic if more than one exists
+
+
+def load_repo_image(level_label: str) -> Tuple[Optional[Image.Image], Optional[str], Optional[str]]:
+    p = find_single_image_for_level(level_label)
+    if p is None:
+        return None, None, None
+    img = Image.open(p).convert("RGB")
+    # hash bytes to detect changes across reruns (fast enough for classroom images)
+    h = hashlib.md5(img.tobytes()).hexdigest()
+    return img, p.name, h
+
+
 # ---------------- helpers ----------------
 def clamp(v, lo, hi):
     return max(lo, min(hi, v))
+
 
 def normalize_rect(p1, p2):
     x0, y0 = p1
     x1, y1 = p2
     return (min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1))
 
+
 def compute_grid_dims(aoi_w_ft, aoi_h_ft, cell_w_ft, cell_h_ft):
     nx = max(1, int(np.ceil(aoi_w_ft / cell_w_ft)))
     ny = max(1, int(np.ceil(aoi_h_ft / cell_h_ft)))
     return nx, ny
+
 
 def click_to_cell(x, y, aoi_px, nx, ny):
     x0, y0, x1, y1 = aoi_px
@@ -38,6 +81,7 @@ def click_to_cell(x, y, aoi_px, nx, ny):
     r = clamp(r, 0, ny - 1)
     return (r, c)
 
+
 def resample_selection(old, new_ny, new_nx):
     old_ny, old_nx = old.shape
     out = np.zeros((new_ny, new_nx), dtype=bool)
@@ -50,6 +94,7 @@ def resample_selection(old, new_ny, new_nx):
             out[r, c] = old[rr, cc]
     return out
 
+
 def selection_csv_bytes(selected):
     output = io.StringIO()
     w = csv.writer(output)
@@ -59,6 +104,7 @@ def selection_csv_bytes(selected):
         for c in range(nx):
             w.writerow([r, c, int(selected[r, c])])
     return output.getvalue().encode("utf-8")
+
 
 def crop_view(img, cx, cy, view_w, view_h):
     """Crop a viewport centered at (cx,cy) in full-image pixels."""
@@ -71,10 +117,23 @@ def crop_view(img, cx, cy, view_w, view_h):
     y1 = y0 + view_h
     return img.crop((x0, y0, x1, y1)), x0, y0  # also return offsets
 
-def draw_overlay_on_view(view_img, view_offset, aoi_px, nx, ny, selected,
-                         show_grid=True, first_corner=None,
-                         grid_outer=4, grid_inner=3, aoi_outer=7, aoi_inner=4,
-                         sel_outer=10, sel_inner=6):
+
+def draw_overlay_on_view(
+    view_img,
+    view_offset,
+    aoi_px,
+    nx,
+    ny,
+    selected,
+    show_grid=True,
+    first_corner=None,
+    grid_outer=7,
+    grid_inner=5,
+    aoi_outer=8,
+    aoi_inner=5,
+    sel_outer=12,
+    sel_inner=7,
+):
     """
     Draw AOI + grid + selection outlines onto a VIEWPORT image.
     Coordinates are mapped from full-image -> viewport via view_offset.
@@ -88,8 +147,8 @@ def draw_overlay_on_view(view_img, view_offset, aoi_px, nx, ny, selected,
         fx, fy = first_corner
         vx, vy = fx - ox, fy - oy
         r = 12
-        d.ellipse([vx-r, vy-r, vx+r, vy+r], outline=(0, 0, 0), width=6)
-        d.ellipse([vx-r, vy-r, vx+r, vy+r], outline=(255, 255, 0), width=3)
+        d.ellipse([vx - r, vy - r, vx + r, vy + r], outline=(0, 0, 0), width=7)
+        d.ellipse([vx - r, vy - r, vx + r, vy + r], outline=(255, 255, 0), width=4)
 
     if aoi_px is None:
         return img
@@ -102,7 +161,7 @@ def draw_overlay_on_view(view_img, view_offset, aoi_px, nx, ny, selected,
     if x1v < 0 or y1v < 0 or x0v > img.size[0] or y0v > img.size[1]:
         return img
 
-    # AOI outline halo + cyan
+    # AOI outline
     d.rectangle([x0v, y0v, x1v, y1v], outline=(0, 0, 0), width=aoi_outer)
     d.rectangle([x0v, y0v, x1v, y1v], outline=(0, 255, 255), width=aoi_inner)
 
@@ -148,19 +207,27 @@ ss.setdefault("img_name", None)
 ss.setdefault("img_hash", None)
 
 ss.setdefault("aoi_clicks", [])
-ss.setdefault("aoi_px", None)              # full-image coords
-ss.setdefault("selected", None)            # bool [ny,nx]
+ss.setdefault("aoi_px", None)  # full-image coords
+ss.setdefault("selected", None)  # bool [ny,nx]
 
 ss.setdefault("status", "")
 ss.setdefault("last_raw_click", None)
 
 # Viewport state (pan/zoom)
-ss.setdefault("view_zoom", 1.0)            # 1.0 = full view; larger = zoom in
+ss.setdefault("view_zoom", 1.0)  # 1.0 = full view; larger = zoom in
 ss.setdefault("view_cx", None)
 ss.setdefault("view_cy", None)
 
+# Level state
+ss.setdefault("level", "Low")
+
+
 with st.sidebar:
     st.header("Inputs")
+
+    st.subheader("Class image")
+    level = st.radio("Weed infestation level", ["Very-low", "Low", "Medium", "High"], index=1)
+    ss["level"] = level
 
     aoi_w_ft = st.number_input("AOI width (ft)", value=100.0, min_value=0.1, step=1.0)
     aoi_h_ft = st.number_input("AOI height (ft)", value=50.0, min_value=0.1, step=1.0)
@@ -214,35 +281,36 @@ with st.sidebar:
         ss["last_raw_click"] = None
 
 
-# -------- Option A layout: Image/Interact first, Results below --------
-st.subheader("Upload image")
-up = st.file_uploader("Upload a drone image", type=["png", "jpg", "jpeg", "tif", "tiff", "bmp"])
-
-if up is not None:
-    data = up.getvalue()
-    h = hashlib.md5(data).hexdigest()
-    if ss["img_hash"] != h:
-        img = Image.open(io.BytesIO(data)).convert("RGB")
-        ss["img"] = img
-        ss["img_name"] = up.name
-        ss["img_hash"] = h
-
-        # init view center
-        W, H = img.size
-        ss["view_cx"] = W // 2
-        ss["view_cy"] = H // 2
-        ss["view_zoom"] = 1.0
-
-        ss["aoi_clicks"] = []
-        ss["aoi_px"] = None
-        ss["selected"] = None
-        ss["status"] = "Image loaded. Click two corners to set AOI."
-        ss["last_raw_click"] = None
-
-if ss["img"] is None:
-    st.info("Upload an image to begin.")
+# ---------------- Load image from repo based on selected level ----------------
+img, name, img_hash = load_repo_image(ss["level"])
+if img is None:
+    st.error(
+        f"No image found for level '{ss['level']}'. "
+        f"Expected 1 image in: images/{LEVEL_DIRS[ss['level']]}/"
+    )
     st.stop()
 
+# Only reset if the image actually changed
+if ss["img_hash"] != img_hash:
+    ss["img"] = img
+    ss["img_name"] = name
+    ss["img_hash"] = img_hash
+
+    W, H = img.size
+    ss["view_cx"] = W // 2
+    ss["view_cy"] = H // 2
+    ss["view_zoom"] = 1.0
+
+    ss["aoi_clicks"] = []
+    ss["aoi_px"] = None
+    ss["selected"] = None
+    ss["status"] = f"Loaded: {ss['level']} ({name}). Set AOI with two clicks."
+    ss["last_raw_click"] = None
+
+st.caption(f"Loaded: **{ss['level']}** → `{ss['img_name']}`")
+
+
+# ---------------- Main interaction ----------------
 base_img = ss["img"]
 W, H = base_img.size
 
@@ -257,17 +325,15 @@ ss["view_cy"] = clamp(int(ss["view_cy"]), 0, H - 1)
 
 # Compute grid dims (can change live without wiping selections)
 nx, ny = compute_grid_dims(aoi_w_ft, aoi_h_ft, cell_w_ft, cell_h_ft)
-
 if ss["aoi_px"] is not None:
     if ss["selected"] is None:
         ss["selected"] = np.zeros((ny, nx), dtype=bool)
     elif ss["selected"].shape != (ny, nx):
         ss["selected"] = resample_selection(ss["selected"], ny, nx)
 
-# ---- Bigger display width now that Results are BELOW ----
-# Tune max if you want: 2400 or 2600 are fine for big monitors.
-disp_w = 2000
-disp_w = clamp(disp_w, 1000, 2400)
+# Bigger image (Option A style; results below)
+disp_w = 2200
+disp_w = clamp(disp_w, 1100, 2600)
 disp_h = int(disp_w * (H / W))
 
 view_w = int(W / ss["view_zoom"])
@@ -277,18 +343,21 @@ view_h = clamp(view_h, 200, H)
 
 view_img, ox, oy = crop_view(base_img, ss["view_cx"], ss["view_cy"], view_w, view_h)
 
-# Need scale factors from displayed viewport -> full-image
+# Scale factors from displayed viewport -> full-image
 sx = view_w / float(disp_w)
 sy = view_h / float(disp_h)
 
 first_corner = ss["aoi_clicks"][0] if len(ss["aoi_clicks"]) == 1 else None
 
 overlay_view = draw_overlay_on_view(
-    view_img, (ox, oy),
-    ss["aoi_px"], nx, ny, ss["selected"],
+    view_img,
+    (ox, oy),
+    ss["aoi_px"],
+    nx,
+    ny,
+    ss["selected"],
     show_grid=show_grid,
     first_corner=first_corner,
-    grid_outer=7, grid_inner=5  # slightly thicker
 ).resize((disp_w, disp_h))
 
 st.subheader("Interact")
@@ -318,11 +387,12 @@ if isinstance(clicked, dict) and "x" in clicked and "y" in clicked:
         x_full = clamp(x_full, 0, W - 1)
         y_full = clamp(y_full, 0, H - 1)
 
-        # handy: set pan center to last click (makes “pan arrows” intuitive)
+        # set pan center to last click
         ss["view_cx"] = x_full
         ss["view_cy"] = y_full
 
         if mode == "Set AOI (2 clicks)":
+            # redefine AOI if already set and user starts over
             if ss["aoi_px"] is not None and len(ss["aoi_clicks"]) == 0:
                 ss["aoi_px"] = None
                 ss["selected"] = None
@@ -349,6 +419,7 @@ if isinstance(clicked, dict) and "x" in clicked and "y" in clicked:
                     ss["selected"][r, c] = ~ss["selected"][r, c]
                     ss["status"] = f"Toggled cell r={r}, c={c}."
 
+        # immediate redraw
         st.rerun()
 
 if ss.get("status"):
@@ -374,6 +445,7 @@ field_savings = savings_frac * full_cost
 
 st.markdown(
     f"""
+**Infestation level:** {ss["level"]}  
 **Image:** {ss["img_name"]}  
 **AOI (ft):** {aoi_w_ft:g} W × {aoi_h_ft:g} H  
 **Cell (ft):** {cell_w_ft:g} W × {cell_h_ft:g} H  
@@ -393,5 +465,5 @@ st.download_button(
     "Download CSV",
     data=selection_csv_bytes(ss["selected"]),
     file_name="spot_spray_grid.csv",
-    mime="text/csv"
+    mime="text/csv",
 )
