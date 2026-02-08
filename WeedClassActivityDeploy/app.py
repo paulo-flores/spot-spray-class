@@ -197,6 +197,15 @@ def draw_overlay_on_view(
     return img
 
 
+def device_default_disp_w():
+    """
+    Conservative default that works well across iPad / Chromebooks / laptops.
+    Since streamlit_image_coordinates wants a numeric pixel width, we choose a safe baseline.
+    Users can fine-tune in the sidebar.
+    """
+    return 1300
+
+
 # ---------------- app ----------------
 st.set_page_config(page_title="Spot Spray Activity", layout="wide")
 st.title("Spot-Spray Classroom Activity")
@@ -220,6 +229,10 @@ ss.setdefault("view_cy", None)
 
 # Level state
 ss.setdefault("level", "Low")
+
+# Display sizing state (Approach A)
+ss.setdefault("auto_fit", True)
+ss.setdefault("disp_w_user", device_default_disp_w())
 
 
 with st.sidebar:
@@ -261,6 +274,17 @@ with st.sidebar:
         ss["view_cy"] = None if ss["view_cy"] is None else ss["view_cy"] + pan_step
 
     st.caption("Tip: click a point in the image, then use arrows to pan around that area.")
+
+    # ---------- Approach A: Auto-fit display width + manual override ----------
+    st.subheader("Display")
+    ss["auto_fit"] = st.checkbox("Auto-fit to device", value=ss["auto_fit"])
+
+    # In "auto" mode we still allow a fine-tune slider (does NOT reset selections)
+    if ss["auto_fit"]:
+        base = device_default_disp_w()
+        ss["disp_w_user"] = st.slider("Fine-tune image width (px)", 700, 2000, int(base), 50)
+    else:
+        ss["disp_w_user"] = st.slider("Image width (px)", 700, 2600, int(ss["disp_w_user"]), 50)
 
     st.divider()
     show_grid = st.checkbox("Show grid lines", value=True)
@@ -331,9 +355,10 @@ if ss["aoi_px"] is not None:
     elif ss["selected"].shape != (ny, nx):
         ss["selected"] = resample_selection(ss["selected"], ny, nx)
 
-# Bigger image (Option A style; results below)
-disp_w = 2200
-disp_w = clamp(disp_w, 1100, 2600)
+# -------- Responsive-ish image width (Approach A) --------
+# Use the sidebar "Display" control. Conservative max helps iPads.
+disp_w = int(ss["disp_w_user"])
+disp_w = clamp(disp_w, 700, 2200)
 disp_h = int(disp_w * (H / W))
 
 view_w = int(W / ss["view_zoom"])
@@ -374,6 +399,7 @@ if debug:
     st.write("aoi_px:", ss["aoi_px"])
     st.write("view offset:", (ox, oy))
     st.write("view zoom:", ss["view_zoom"])
+    st.write("disp_w:", disp_w)
 
 # Handle click exactly once per new click
 if isinstance(clicked, dict) and "x" in clicked and "y" in clicked:
